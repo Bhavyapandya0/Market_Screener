@@ -678,7 +678,7 @@ def main():
 
         # Filter 1 – Close near High
         f1_title = "Close near Low" if side_upper == "SELL" else "Close near High"
-        f1_enabled = st.checkbox(f1_title, value=True)
+        f1_enabled = st.checkbox(f1_title, value=False)
         f1_pct = 1.0
         if f1_enabled:
             dist_label = "Max % distance from Low" if side_upper == "SELL" else "Max % distance from High"
@@ -686,7 +686,7 @@ def main():
 
         # Filter 2 – Range consolidation break signal
         f2_title = "Range Consolidation Breakdown" if side_upper == "SELL" else "Range Consolidation Breakout"
-        f2_enabled = st.checkbox(f2_title, value=True)
+        f2_enabled = st.checkbox(f2_title, value=False)
         f2_lookback = 15
         f2_max_range = 5.0
         f2_buffer = 0.0
@@ -700,7 +700,7 @@ def main():
             f2_structure = True
 
         # Filter 3 – Volume spike
-        f3_enabled = st.checkbox("Volume Spike", value=True)
+        f3_enabled = st.checkbox("Volume Spike", value=False)
         f3_lookback = 5
         if f3_enabled:
             f3_lookback = st.slider("Avg Volume lookback (candles)", 2, 20, 5, 1, key="f3")
@@ -738,7 +738,7 @@ def main():
 
         st.markdown("---")
         st.subheader("Sector Summary")
-        ss_enabled = st.checkbox("Enable Sector Summary", value=True)
+        ss_enabled = st.checkbox("Enable Sector Summary", value=False)
         ss_near_high_pct = 1.0
         ss_near_low_pct = 1.0
         if ss_enabled:
