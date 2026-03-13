@@ -77,7 +77,8 @@ NIFTY_500 = [
 ]
 
 # Preferred external symbol file (latest Nifty 500 constituents).
-DEFAULT_NIFTY500_CSV = Path("/Users/bhavyapandya/Downloads/ind_nifty500list (2).csv")
+# Keep this file in the repo so Streamlit Cloud can access it.
+DEFAULT_NIFTY500_CSV = Path("ind_nifty500list.csv")
 # Optional local sector mapping file for fast lookups.
 SECTOR_CSV = Path("nifty500_sectors.csv")
 
@@ -171,7 +172,8 @@ def _load_sector_map_from_csv(path: Path) -> dict[str, str]:
     return out
 
 
-BASE_SYMBOLS = _load_symbols_from_csv(DEFAULT_NIFTY500_CSV) or NIFTY_500
+LOADED_SYMBOLS = _load_symbols_from_csv(DEFAULT_NIFTY500_CSV)
+BASE_SYMBOLS = LOADED_SYMBOLS or NIFTY_500
 NSE_SYMBOLS = _build_nse_symbols(BASE_SYMBOLS)
 SYMBOL_SECTORS = _load_sector_map_from_csv(SECTOR_CSV)
 
@@ -663,8 +665,13 @@ def main():
     # ── Sidebar ─────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Scan Settings")
-        source = "CSV" if BASE_SYMBOLS is not NIFTY_500 else "Built-in list"
+        using_csv = bool(LOADED_SYMBOLS)
+        source = f"CSV: {DEFAULT_NIFTY500_CSV.name}" if using_csv else "Built-in list"
         st.caption(f"Universe: {source} ({len(NSE_SYMBOLS)} symbols)")
+        if not using_csv:
+            st.caption(
+                f"Add `{DEFAULT_NIFTY500_CSV.name}` to the repo to load the full Nifty 500 universe on Streamlit Cloud."
+            )
 
         timeframe = st.selectbox("Timeframe", ["Day", "Week", "Month"], index=0)
         trade_side = st.selectbox("Signal Side", ["Buy", "Sell"], index=0)
