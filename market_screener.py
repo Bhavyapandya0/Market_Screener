@@ -175,7 +175,8 @@ def _load_sector_map_from_csv(path: Path) -> dict[str, str]:
 LOADED_SYMBOLS = _load_symbols_from_csv(DEFAULT_NIFTY500_CSV)
 BASE_SYMBOLS = LOADED_SYMBOLS or NIFTY_500
 NSE_SYMBOLS = _build_nse_symbols(BASE_SYMBOLS)
-SYMBOL_SECTORS = _load_sector_map_from_csv(SECTOR_CSV)
+SECTOR_MAP_SOURCE = SECTOR_CSV if SECTOR_CSV.exists() else DEFAULT_NIFTY500_CSV
+SYMBOL_SECTORS = _load_sector_map_from_csv(SECTOR_MAP_SOURCE)
 
 
 # ── Scanner Logic ───────────────────────────────────────────────────────────
