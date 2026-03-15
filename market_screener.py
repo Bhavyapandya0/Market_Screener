@@ -1,7 +1,11 @@
 import os
+import html
 import logging
+import pickle
 import subprocess
 import sys
+import threading
+from functools import lru_cache
 from pathlib import Path
 
 # Suppress Streamlit ScriptRunContext warnings from background threads
@@ -21,66 +25,12 @@ import concurrent.futures
 import time
 
 # ── Stock Universe ──────────────────────────────────────────────────────────
-NIFTY_500 = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "ITC",
-    "SBIN", "BHARTIARTL", "BAJFINANCE", "KOTAKBANK", "LT", "HCLTECH",
-    "AXISBANK", "ASIANPAINT", "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO",
-    "BAJAJFINSV", "WIPRO", "ONGC", "NTPC", "JSWSTEEL", "POWERGRID",
-    "M&M", "TATAMOTORS", "ADANIENT", "ADANIPORTS", "TATASTEEL",
-    "NESTLEIND", "TECHM", "INDUSINDBK", "HDFCLIFE", "BAJAJ-AUTO",
-    "GRASIM", "DIVISLAB", "CIPLA", "BRITANNIA", "DRREDDY", "EICHERMOT",
-    "APOLLOHOSP", "COALINDIA", "SBILIFE", "BPCL", "TATACONSUM",
-    "HINDALCO", "HEROMOTOCO", "DABUR", "HAVELLS", "PIDILITIND",
-    "SIEMENS", "GODREJCP", "DLF", "BANKBARODA", "IOC", "AMBUJACEM",
-    "SHREECEM", "TRENT", "ICICIPRULI", "ACC", "COLPAL", "TORNTPHARM",
-    "ABB", "MARICO", "PNB", "BERGEPAINT", "NAUKRI", "MCDOWELL-N",
-    "INDIGO", "VEDL", "JINDALSTEL", "GAIL", "LUPIN", "PIIND",
-    "CANBK", "SAIL", "FEDERALBNK", "IDFCFIRSTB", "PERSISTENT",
-    "LTIM", "MAXHEALTH", "TATAPOWER", "NHPC", "IDEA", "IRCTC",
-    "HAL", "BEL", "RECLTD", "PFC", "CONCOR", "MOTHERSON",
-    "SOLARINDS", "DMART", "ZOMATO", "PAYTM", "POLICYBZR",
-    "ADANIGREEN", "ADANIPOWER", "ATGL", "AWL", "LODHA",
-    "JIOFIN", "MANKIND", "TIINDIA", "CUMMINSIND", "VOLTAS",
-    "AUROPHARMA", "MUTHOOTFIN", "CHOLAFIN", "TVSMOTOR", "PAGEIND",
-    "ASTRAL", "BALKRISIND", "CROMPTON", "LICHSGFIN", "OBEROIRLTY",
-    "PRESTIGE", "PHOENIXLTD", "COFORGE", "MPHASIS", "LTTS",
-    "DIXON", "POLYCAB", "DEEPAKNTR", "ATUL", "NAVINFLUOR",
-    "SRF", "UPL", "BIOCON", "ALKEM", "LALPATHLAB", "METROPOLIS",
-    "IPCALAB", "ABCAPITAL", "MANAPPURAM", "L&TFH", "SBICARD",
-    "AUBANK", "BANDHANBNK", "RBLBANK", "IDFC", "GMRINFRA",
-    "IRFC", "SJVN", "NMDC", "HINDZINC", "NATIONALUM",
-    "RAIN", "GNFC", "CHAMBLFERT", "COROMANDEL", "UBL",
-    "OFSS", "MFSL", "BSE", "CDSL", "MCX",
-    "KPITTECH", "HAPPSTMNDS", "ZYDUSLIFE", "TORNTPOWER", "CESC",
-    "TATAELXSI", "SONACOMS", "JUBLFOOD", "DEVYANI", "SAPPHIRE",
-    "ABFRL", "VBL", "BATAINDIA", "RELAXO", "RAJESHEXPO",
-    "GODREJPROP", "BRIGADE", "SOBHA", "SUNTV", "PVRINOX",
-    "ESCORTS", "ASHOKLEY", "EXIDEIND", "AMARAJABAT", "BOSCHLTD",
-    "BHARATFORG", "SUNDARMFIN", "CANFINHOME", "AAVAS", "HOMEFIRST",
-    "KAJARIACER", "CENTURYTEX", "JKCEMENT", "RAMCOCEM", "DALBHARAT",
-    "STARCEMENT", "PETRONET", "GSPL", "IGL", "MGL",
-    "HDFCAMC", "NIACL", "ICICIGI", "STARHEALTH",
-    "KEI", "SUPREMEIND", "APLAPOLLO", "RATNAMANI",
-    "CARBORUNIV", "GRINDWELL", "FINEORG", "CLEAN",
-    "SUMICHEM", "TATACHEM", "AARTI", "FLUOROCHEM",
-    "SYNGENE", "GLAND", "NATCOPHARM", "LAURUSLABS",
-    "WHIRLPOOL", "BLUESTARCO", "ORIENTELEC",
-    "KAYNES", "CYIENT", "MASTEK", "ROUTE", "TANLA",
-    "JBCHEPHARM", "SUPRIYA", "LAXMIMACH", "CERA",
-    "GRSE", "COCHINSHIP", "MAZDOCK", "GARDENREACH",
-    "ZEEL", "NETWORK18", "TV18BRDCST", "HATHWAY",
-    "ENGINERSIN", "RITES", "RAILTEL", "RVNL", "HUDCO",
-    "JSWENERGY", "ADANITRANS", "THERMAX", "CGPOWER",
-    "SCHAEFFLER", "TIMKEN", "SKFIND",
-    "CENTRALBK", "UNIONBANK", "INDIANB", "MAHABANK",
-    "UCOBANK", "BANKINDIA", "PSB", "IOB",
-]
-
-# Preferred external symbol file (latest Nifty 500 constituents).
-# Keep this file in the repo so Streamlit Cloud can access it.
 DEFAULT_NIFTY500_CSV = Path("ind_nifty500list.csv")
 # Optional local sector mapping file for fast lookups.
 SECTOR_CSV = Path("nifty500_sectors.csv")
+CACHE_DIR = Path(".scanner_cache")
+DOWNLOAD_BATCH_SIZE = 75
+PREVIEW_START_DATE = "2025-03-01"
 
 # Map stale NSE symbols to current/working Yahoo symbols.
 # Best-effort replacements for renamed/merged companies.
@@ -173,30 +123,369 @@ def _load_sector_map_from_csv(path: Path) -> dict[str, str]:
 
 
 LOADED_SYMBOLS = _load_symbols_from_csv(DEFAULT_NIFTY500_CSV)
-BASE_SYMBOLS = LOADED_SYMBOLS or NIFTY_500
-NSE_SYMBOLS = _build_nse_symbols(BASE_SYMBOLS)
+NSE_SYMBOLS = _build_nse_symbols(LOADED_SYMBOLS)
 SECTOR_MAP_SOURCE = SECTOR_CSV if SECTOR_CSV.exists() else DEFAULT_NIFTY500_CSV
 SYMBOL_SECTORS = _load_sector_map_from_csv(SECTOR_MAP_SOURCE)
+_CACHE_LOCK = threading.Lock()
+
+
+def _sanitize_cache_key(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in value)
+
+
+def _cache_file_path(period: str, interval: str) -> Path:
+    return CACHE_DIR / f"ohlc_{_today_cache_key()}_{_sanitize_cache_key(period)}_{_sanitize_cache_key(interval)}.pkl"
+
+
+def _today_cache_key() -> str:
+    return datetime.now().strftime("%Y%m%d")
+
+
+def _preview_cache_file_path() -> Path:
+    return CACHE_DIR / f"hover_ohlc_{_today_cache_key()}_{PREVIEW_START_DATE.replace('-', '')}.pkl"
+
+
+def _normalize_history_frame(df: pd.DataFrame) -> pd.DataFrame | None:
+    if df.empty or len(df) < 2:
+        return None
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    if any(col not in df.columns for col in required):
+        return None
+    cleaned = df.copy()
+    numeric_cols = [c for c in required if c in cleaned.columns]
+    cleaned[numeric_cols] = cleaned[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    cleaned = cleaned.dropna(subset=["Open", "High", "Low", "Close"])
+    if cleaned.empty:
+        return None
+    return cleaned
+
+
+def _iter_symbol_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
+    return [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+
+
+def _extract_symbol_history(downloaded: pd.DataFrame, symbol: str) -> pd.DataFrame | None:
+    if downloaded.empty:
+        return None
+
+    if isinstance(downloaded.columns, pd.MultiIndex):
+        try:
+            df = downloaded.xs(symbol, axis=1, level=1, drop_level=True)
+        except (KeyError, IndexError):
+            try:
+                df = downloaded.xs(symbol, axis=1, level=0, drop_level=True)
+            except (KeyError, IndexError):
+                return None
+    else:
+        df = downloaded.copy()
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
+    return _normalize_history_frame(df)
+
+
+def _load_cached_ohlc(path: Path) -> dict[str, pd.DataFrame] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as fh:
+            payload = pickle.load(fh)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _download_daily_ohlc_snapshot(period: str, interval: str, progress_cb=None) -> dict[str, pd.DataFrame]:
+    cache_payload: dict[str, pd.DataFrame] = {}
+    batches = _iter_symbol_batches(NSE_SYMBOLS, DOWNLOAD_BATCH_SIZE)
+    total_batches = len(batches)
+    total_symbols = len(NSE_SYMBOLS)
+    for batch_idx, symbol_batch in enumerate(batches, start=1):
+        if progress_cb is not None:
+            fetched_so_far = min((batch_idx - 1) * DOWNLOAD_BATCH_SIZE, total_symbols)
+            progress_cb(fetched_so_far, total_symbols, batch_idx - 1, total_batches)
+        downloaded = yf.download(
+            symbol_batch,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            group_by="ticker",
+        )
+        for symbol in symbol_batch:
+            df = _extract_symbol_history(downloaded, symbol)
+            if df is not None:
+                cache_payload[symbol] = df
+        if progress_cb is not None:
+            fetched_so_far = min(batch_idx * DOWNLOAD_BATCH_SIZE, total_symbols)
+            progress_cb(fetched_so_far, total_symbols, batch_idx, total_batches)
+    return cache_payload
+
+
+def _download_preview_ohlc_snapshot() -> dict[str, pd.DataFrame]:
+    cache_payload: dict[str, pd.DataFrame] = {}
+    for symbol_batch in _iter_symbol_batches(NSE_SYMBOLS, DOWNLOAD_BATCH_SIZE):
+        downloaded = yf.download(
+            symbol_batch,
+            start=PREVIEW_START_DATE,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            group_by="ticker",
+        )
+        for symbol in symbol_batch:
+            df = _extract_symbol_history(downloaded, symbol)
+            if df is not None:
+                cache_payload[symbol] = df
+    return cache_payload
+
+
+def _get_daily_ohlc_cache(period: str, interval: str, day_key: str, progress_cb=None) -> dict[str, pd.DataFrame]:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _cache_file_path(period, interval)
+    cached = _load_cached_ohlc(cache_path)
+    if cached is not None:
+        if progress_cb is not None:
+            progress_cb(len(cached), len(NSE_SYMBOLS), 1, 1)
+        return cached
+
+    with _CACHE_LOCK:
+        cached = _load_cached_ohlc(cache_path)
+        if cached is not None:
+            if progress_cb is not None:
+                progress_cb(len(cached), len(NSE_SYMBOLS), 1, 1)
+            return cached
+
+        cache_payload = _download_daily_ohlc_snapshot(period, interval, progress_cb=progress_cb)
+        with cache_path.open("wb") as fh:
+            pickle.dump(cache_payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        return cache_payload
+
+
+@lru_cache(maxsize=16)
+def get_daily_ohlc_cache(period: str, interval: str, day_key: str) -> dict[str, pd.DataFrame]:
+    return _get_daily_ohlc_cache(period, interval, day_key)
+
+
+@lru_cache(maxsize=4)
+def get_preview_ohlc_cache(day_key: str) -> dict[str, pd.DataFrame]:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _preview_cache_file_path()
+    cached = _load_cached_ohlc(cache_path)
+    if cached is not None:
+        return cached
+
+    with _CACHE_LOCK:
+        cached = _load_cached_ohlc(cache_path)
+        if cached is not None:
+            return cached
+
+        cache_payload = _download_preview_ohlc_snapshot()
+        with cache_path.open("wb") as fh:
+            pickle.dump(cache_payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        return cache_payload
 
 
 # ── Scanner Logic ───────────────────────────────────────────────────────────
 def fetch_stock_data(symbol: str, period: str, interval: str) -> pd.DataFrame | None:
-    """Fetch OHLCV data for a single stock."""
+    """Fetch OHLCV data for a single stock from the daily on-disk cache."""
     try:
-        # Use per-symbol history instead of bulk-style download to avoid
-        # occasional column-mixing issues in threaded scans.
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval, auto_adjust=False)
-        if df.empty or len(df) < 15:
+        cache_payload = get_daily_ohlc_cache(period, interval, _today_cache_key())
+        df = cache_payload.get(symbol)
+        if df is None or df.empty:
             return None
-        # yfinance may still return duplicated labels in edge-cases.
-        if df.columns.duplicated().any():
-            df = df.loc[:, ~df.columns.duplicated()]
-
+        df = df.copy()
+        if len(df) < 15:
+            return None
         df["Symbol"] = symbol
         return df
     except Exception:
         return None
+
+
+def warm_daily_cache(period: str, interval: str, progress_cb=None) -> tuple[int, int]:
+    cache_payload = _get_daily_ohlc_cache(period, interval, _today_cache_key(), progress_cb=progress_cb)
+    return len(cache_payload), len(NSE_SYMBOLS)
+
+
+def warm_preview_cache() -> tuple[int, int]:
+    cache_payload = get_preview_ohlc_cache(_today_cache_key())
+    return len(cache_payload), len(NSE_SYMBOLS)
+
+
+def _resample_ohlc(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if timeframe == "Day":
+        out = df.copy()
+    else:
+        rule = "W-FRI" if timeframe == "Week" else "ME"
+        out = df.resample(rule).agg(
+            {
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+    out = out.dropna(subset=["Open", "High", "Low", "Close"])
+    return out
+
+
+def _select_hover_window(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    bars = _resample_ohlc(df, timeframe)
+    if bars.empty:
+        return bars
+    return bars.tail(30)
+
+
+def _render_candlestick_svg(df: pd.DataFrame, width: int = 360, height: int = 210, title: str | None = None) -> str:
+    if df.empty:
+        return f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}'></svg>"
+
+    pad_x = 10
+    pad_y = 10
+    chart_w = width - (2 * pad_x)
+    chart_h = height - (2 * pad_y)
+    low_min = float(df["Low"].min())
+    high_max = float(df["High"].max())
+    if high_max <= low_min:
+        high_max = low_min + 1.0
+
+    def y_pos(value: float) -> float:
+        ratio = (value - low_min) / (high_max - low_min)
+        return pad_y + chart_h - (ratio * chart_h)
+
+    count = len(df)
+    step = chart_w / max(count, 1)
+    body_w = max(4.5, step * 0.62)
+    parts = [
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'>",
+        f"<rect x='0' y='0' width='{width}' height='{height}' rx='10' fill='#0f172a'/>",
+        f"<line x1='{pad_x}' y1='{pad_y}' x2='{pad_x}' y2='{height - pad_y}' stroke='#334155' stroke-width='1'/>",
+        f"<line x1='{pad_x}' y1='{height - pad_y}' x2='{width - pad_x}' y2='{height - pad_y}' stroke='#334155' stroke-width='1'/>",
+    ]
+
+    for idx, (_, row) in enumerate(df.iterrows()):
+        x = pad_x + (idx * step) + (step / 2.0)
+        open_y = y_pos(float(row["Open"]))
+        high_y = y_pos(float(row["High"]))
+        low_y = y_pos(float(row["Low"]))
+        close_y = y_pos(float(row["Close"]))
+        color = "#22c55e" if float(row["Close"]) >= float(row["Open"]) else "#ef4444"
+        body_top = min(open_y, close_y)
+        body_height = max(abs(close_y - open_y), 1.6)
+        body_x = x - (body_w / 2.0)
+        parts.append(
+            f"<line x1='{x:.2f}' y1='{high_y:.2f}' x2='{x:.2f}' y2='{low_y:.2f}' stroke='{color}' stroke-width='1.4'/>"
+        )
+        parts.append(
+            f"<rect x='{body_x:.2f}' y='{body_top:.2f}' width='{body_w:.2f}' height='{body_height:.2f}' "
+            f"fill='{color}' stroke='{color}' rx='1'/>"
+        )
+
+    last_close = float(df["Close"].iloc[-1])
+    if title:
+        parts.append(
+            f"<text x='{pad_x}' y='16' text-anchor='start' font-size='12' font-weight='600' fill='#e5e7eb'>{html.escape(title)}</text>"
+        )
+    parts.append(
+        f"<text x='{width - 8}' y='16' text-anchor='end' font-size='11' fill='#cbd5e1'>Close {last_close:.2f}</text>"
+    )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _format_table_value(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value)}"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.2f}"
+    return html.escape(str(value))
+
+
+def _build_tooltip_html(inner_html: str) -> str:
+    return (
+        "<div class='hover-tooltip' style='display:none; position:absolute; left:0; top:calc(100% + 8px); z-index:50; "
+        "background:#111827; border:1px solid #334155; border-radius:10px; padding:12px; min-width:380px; "
+        "box-shadow:0 10px 30px rgba(0,0,0,0.35);'>"
+        f"{inner_html}</div>"
+    )
+
+
+def _build_symbol_hover_cell(
+    symbol: str,
+    timeframe: str,
+    preview_cache: dict[str, pd.DataFrame],
+    fallback_cache: dict[str, pd.DataFrame] | None = None,
+) -> str:
+    raw_symbol = str(symbol).strip()
+    cache_key = f"{raw_symbol}.NS" if not raw_symbol.endswith(".NS") else raw_symbol
+    preview_df = preview_cache.get(cache_key)
+    if (preview_df is None or preview_df.empty) and fallback_cache is not None:
+        preview_df = fallback_cache.get(cache_key)
+
+    if preview_df is None or preview_df.empty:
+        tooltip = _build_tooltip_html(
+            "<div style='min-width:180px; color:#cbd5e1; font-size:0.86rem;'>Preview unavailable</div>"
+        )
+    else:
+        chart_df = _select_hover_window(preview_df, timeframe)
+        tooltip = _build_tooltip_html(_render_candlestick_svg(chart_df, title=raw_symbol))
+
+    return (
+        "<div class='symbol-hover' style='position:relative; display:inline-block;'>"
+        f"<span style='cursor:pointer; color:#60a5fa; font-weight:600;'>{html.escape(raw_symbol)}</span>"
+        f"{tooltip}</div>"
+    )
+
+
+def render_results_table(
+    df: pd.DataFrame,
+    timeframe: str,
+    preview_cache: dict[str, pd.DataFrame],
+    fallback_cache: dict[str, pd.DataFrame] | None = None,
+) -> str:
+    columns = list(df.columns)
+    header_html = "".join(
+        f"<th style='padding:10px 12px; text-align:left; position:sticky; top:0; background:#111827; color:#e5e7eb; border-bottom:1px solid #334155;'>{html.escape(str(col))}</th>"
+        for col in columns
+    )
+
+    body_rows = []
+    for _, row in df.iterrows():
+        cells = []
+        for col in columns:
+            if col == "Symbol":
+                rendered = _build_symbol_hover_cell(row[col], timeframe, preview_cache, fallback_cache)
+            else:
+                rendered = _format_table_value(row[col])
+            cells.append(
+                f"<td style='padding:10px 12px; border-bottom:1px solid #1f2937; white-space:nowrap;'>{rendered}</td>"
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    return (
+        "<style>"
+        "thead th { z-index: 3; }"
+        "tbody td { vertical-align: middle; }"
+        ".symbol-hover { position: relative; display: inline-block; min-width: 120px; }"
+        ".symbol-hover > span { display: inline-block; }"
+        ".symbol-hover:hover > .hover-tooltip { display:block !important; }"
+        ".symbol-hover > .hover-tooltip:hover { display:block !important; }"
+        "</style>"
+        "<div style='overflow:visible; border:1px solid #1f2937; border-radius:12px;'>"
+        "<table style='width:100%; border-collapse:collapse; background:#0b1220; color:#e5e7eb; font-size:0.92rem;'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
 
 
 def _col(df: pd.DataFrame, name: str) -> pd.Series:
@@ -663,16 +952,17 @@ def main():
     st.title("Stock Scanner")
     st.caption("Scan NSE stocks using customisable technical filters powered by yfinance")
 
+    if not LOADED_SYMBOLS:
+        st.error(
+            f"Universe file `{DEFAULT_NIFTY500_CSV.name}` is missing, empty, or unreadable. "
+            "Add a valid CSV with a `Symbol` column to run the scanner."
+        )
+        return
+
     # ── Sidebar ─────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Scan Settings")
-        using_csv = bool(LOADED_SYMBOLS)
-        source = f"CSV: {DEFAULT_NIFTY500_CSV.name}" if using_csv else "Built-in list"
-        st.caption(f"Universe: {source} ({len(NSE_SYMBOLS)} symbols)")
-        if not using_csv:
-            st.caption(
-                f"Add `{DEFAULT_NIFTY500_CSV.name}` to the repo to load the full Nifty 500 universe on Streamlit Cloud."
-            )
+        st.caption(f"Universe: {DEFAULT_NIFTY500_CSV.name} ({len(NSE_SYMBOLS)} symbols)")
 
         timeframe = st.selectbox("Timeframe", ["Day", "Week", "Month"], index=0)
         trade_side = st.selectbox("Signal Side", ["Buy", "Sell"], index=0)
@@ -818,25 +1108,54 @@ def main():
             st.warning("Enable at least one filter to scan.")
             return
 
+        cache_count_text = None
+        run_progress = st.progress(0, text="Preparing scan...")
+
+        try:
+            def _cache_progress(done_symbols: int, total_symbols: int, done_batches: int, total_batches: int) -> None:
+                if total_symbols <= 0:
+                    progress_value = 0.08
+                else:
+                    progress_value = 0.02 + (min(done_symbols, total_symbols) / total_symbols) * 0.28
+                if done_batches > 0 and total_batches > 1:
+                    text = (
+                        f"Loading daily OHLC cache... {done_symbols}/{total_symbols} symbols "
+                        f"(batch {done_batches}/{total_batches})"
+                    )
+                else:
+                    text = f"Loading daily OHLC cache... {done_symbols}/{total_symbols} symbols"
+                run_progress.progress(progress_value, text=text)
+
+            cached_count, total_count = warm_daily_cache(period, interval, progress_cb=_cache_progress)
+            cache_count_text = f"{cached_count}/{total_count}"
+            if f6_enabled:
+                run_progress.progress(0.14, text="Loading MM daily cache...")
+                warm_daily_cache("2y", "1d")
+        except Exception as exc:
+            run_progress.empty()
+            st.error(f"Failed to prepare OHLC cache: {exc}")
+            return
+
+        if cache_count_text:
+            st.caption(f"OHLC cache: {cache_count_text}")
+
         if enabled:
             st.info(f"Scanning **{len(NSE_SYMBOLS)}** stocks on **{timeframe}** timeframe with filters: {', '.join(enabled)}")
 
-            progress = st.progress(0, text="Scanning...")
             results = []
             scanned = 0
+            scan_progress_start = 0.42 if f6_enabled else 0.34
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(scan_stock, sym, period, interval, filters): sym
                            for sym in NSE_SYMBOLS}
                 for future in concurrent.futures.as_completed(futures):
                     scanned += 1
-                    progress.progress(scanned / len(NSE_SYMBOLS),
-                                      text=f"Scanned {scanned}/{len(NSE_SYMBOLS)}...")
+                    progress_value = scan_progress_start + ((scanned / len(NSE_SYMBOLS)) * (1.0 - scan_progress_start))
+                    run_progress.progress(progress_value, text=f"Scanned {scanned}/{len(NSE_SYMBOLS)}...")
                     res = future.result()
                     if res is not None:
                         results.append(res)
-
-            progress.empty()
 
             if results:
                 df_results = pd.DataFrame(results)
@@ -873,15 +1192,28 @@ def main():
                     df_results = df_results.sort_values("Volume", ascending=False).reset_index(drop=True)
                 df_results.index += 1
                 st.success(f"Found **{len(df_results)}** stocks matching all enabled filters.")
-                st.dataframe(df_results, use_container_width=True, height=600)
+
+                try:
+                    run_progress.progress(1.0, text="Preparing hover charts...")
+                    preview_cache = get_preview_ohlc_cache(_today_cache_key())
+                    fallback_cache = get_daily_ohlc_cache(period, interval, _today_cache_key())
+                    st.markdown(
+                        render_results_table(df_results, timeframe, preview_cache, fallback_cache),
+                        unsafe_allow_html=True,
+                    )
+                except Exception as exc:
+                    st.warning(f"Hover chart preview unavailable: {exc}")
+                    st.dataframe(df_results, use_container_width=True, height=600)
 
                 # Download button
                 csv = df_results.to_csv(index=False)
                 st.download_button("Download CSV", csv, "scan_results.csv", "text/csv")
             else:
                 st.warning("No stocks matched all enabled filters. Try relaxing the parameters.")
+            run_progress.empty()
         else:
             st.info("No technical filters enabled. Running Sector Summary only.")
+            run_progress.empty()
 
         if ss_enabled:
             sec_progress = st.progress(0, text="Building sector summary...")
@@ -989,6 +1321,8 @@ def main():
             p_timeframe = payload.get("timeframe", timeframe)
             p_near_high = float(payload.get("near_high_pct", ss_near_high_pct))
             p_near_low = float(payload.get("near_low_pct", ss_near_low_pct))
+            detail_tf_map = {"Day": ("6mo", "1d"), "Week": ("2y", "1wk"), "Month": ("5y", "1mo")}
+            detail_period, detail_interval = detail_tf_map.get(p_timeframe, ("6mo", "1d"))
 
             st.markdown("---")
             st.subheader("Sector Summary (Near High / Near Low)")
@@ -1040,7 +1374,15 @@ def main():
                         st.info("No stocks for this selection.")
                     else:
                         detail.index += 1
-                        st.dataframe(detail, use_container_width=True, height=320)
+                        try:
+                            preview_cache = get_preview_ohlc_cache(_today_cache_key())
+                            fallback_cache = get_daily_ohlc_cache(detail_period, detail_interval, _today_cache_key())
+                            st.markdown(
+                                render_results_table(detail, p_timeframe, preview_cache, fallback_cache),
+                                unsafe_allow_html=True,
+                            )
+                        except Exception:
+                            st.dataframe(detail, use_container_width=True, height=320)
                 else:
                     vals = summary_map.get(sec)
                     if vals is None:
@@ -1060,7 +1402,15 @@ def main():
                         st.info("No stocks for this selection.")
                     else:
                         detail.index += 1
-                        st.dataframe(detail, use_container_width=True, height=320)
+                        try:
+                            preview_cache = get_preview_ohlc_cache(_today_cache_key())
+                            fallback_cache = get_daily_ohlc_cache(detail_period, detail_interval, _today_cache_key())
+                            st.markdown(
+                                render_results_table(detail, p_timeframe, preview_cache, fallback_cache),
+                                unsafe_allow_html=True,
+                            )
+                        except Exception:
+                            st.dataframe(detail, use_container_width=True, height=320)
         else:
             st.info("Run Scan once to build Sector Summary.")
 
