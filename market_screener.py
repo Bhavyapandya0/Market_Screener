@@ -127,6 +127,15 @@ NSE_SYMBOLS = _build_nse_symbols(LOADED_SYMBOLS)
 SECTOR_MAP_SOURCE = SECTOR_CSV if SECTOR_CSV.exists() else DEFAULT_NIFTY500_CSV
 SYMBOL_SECTORS = _load_sector_map_from_csv(SECTOR_MAP_SOURCE)
 _CACHE_LOCK = threading.Lock()
+_BACKGROUND_WARM_LOCK = threading.Lock()
+_BACKGROUND_WARM_STATE = {
+    "day_key": None,
+    "started": False,
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "label": "",
+}
 
 
 def _sanitize_cache_key(value: str) -> str:
@@ -316,6 +325,78 @@ def warm_daily_cache(period: str, interval: str, progress_cb=None) -> tuple[int,
 def warm_preview_cache() -> tuple[int, int]:
     cache_payload = get_preview_ohlc_cache(_today_cache_key())
     return len(cache_payload), len(NSE_SYMBOLS)
+
+
+def _background_warm_tasks() -> list[tuple[str, str] | tuple[str]]:
+    return [
+        ("6mo", "1d"),
+        ("2y", "1wk"),
+        ("5y", "1mo"),
+        ("2y", "1d"),
+        ("preview",),
+    ]
+
+
+def _run_background_warmup(day_key: str) -> None:
+    tasks = _background_warm_tasks()
+    total_steps = len(tasks)
+    with _BACKGROUND_WARM_LOCK:
+        _BACKGROUND_WARM_STATE["running"] = True
+        _BACKGROUND_WARM_STATE["done"] = 0
+        _BACKGROUND_WARM_STATE["total"] = total_steps
+        _BACKGROUND_WARM_STATE["label"] = "Starting cache warm-up"
+
+    try:
+        for idx, task in enumerate(tasks, start=1):
+            with _BACKGROUND_WARM_LOCK:
+                _BACKGROUND_WARM_STATE["done"] = idx - 1
+                if len(task) == 1:
+                    _BACKGROUND_WARM_STATE["label"] = "Warming hover cache"
+                else:
+                    period, interval = task
+                    _BACKGROUND_WARM_STATE["label"] = f"Warming {period} / {interval} cache"
+
+            if len(task) == 1:
+                warm_preview_cache()
+            else:
+                period, interval = task
+                warm_daily_cache(period, interval)
+
+        with _BACKGROUND_WARM_LOCK:
+            _BACKGROUND_WARM_STATE["done"] = total_steps
+            _BACKGROUND_WARM_STATE["running"] = False
+            _BACKGROUND_WARM_STATE["started"] = True
+            _BACKGROUND_WARM_STATE["label"] = "Background warm-up complete"
+    except Exception:
+        with _BACKGROUND_WARM_LOCK:
+            _BACKGROUND_WARM_STATE["running"] = False
+            _BACKGROUND_WARM_STATE["started"] = False
+            _BACKGROUND_WARM_STATE["label"] = "Background warm-up paused"
+
+
+def start_background_warmup() -> None:
+    day_key = _today_cache_key()
+    with _BACKGROUND_WARM_LOCK:
+        if _BACKGROUND_WARM_STATE["day_key"] != day_key:
+            _BACKGROUND_WARM_STATE["day_key"] = day_key
+            _BACKGROUND_WARM_STATE["started"] = False
+            _BACKGROUND_WARM_STATE["running"] = False
+            _BACKGROUND_WARM_STATE["done"] = 0
+            _BACKGROUND_WARM_STATE["total"] = len(_background_warm_tasks())
+            _BACKGROUND_WARM_STATE["label"] = ""
+
+        if _BACKGROUND_WARM_STATE["started"] or _BACKGROUND_WARM_STATE["running"]:
+            return
+
+        _BACKGROUND_WARM_STATE["started"] = True
+        _BACKGROUND_WARM_STATE["running"] = True
+        worker = threading.Thread(target=_run_background_warmup, args=(day_key,), daemon=True)
+        worker.start()
+
+
+def get_background_warm_status() -> dict[str, object]:
+    with _BACKGROUND_WARM_LOCK:
+        return dict(_BACKGROUND_WARM_STATE)
 
 
 def _resample_ohlc(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -949,6 +1030,7 @@ def scan_sector_proximity(
 # ── Streamlit UI ────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Stock Scanner", page_icon="📈", layout="wide")
+    start_background_warmup()
     st.title("Stock Scanner")
     st.caption("Scan NSE stocks using customisable technical filters powered by yfinance")
 
@@ -963,6 +1045,14 @@ def main():
     with st.sidebar:
         st.header("Scan Settings")
         st.caption(f"Universe: {DEFAULT_NIFTY500_CSV.name} ({len(NSE_SYMBOLS)} symbols)")
+        warm_status = get_background_warm_status()
+        total_bg = int(warm_status.get("total", 0) or 0)
+        done_bg = int(warm_status.get("done", 0) or 0)
+        label_bg = str(warm_status.get("label", "") or "")
+        if bool(warm_status.get("running")) and total_bg > 0:
+            st.caption(f"Background cache warm-up: {done_bg}/{total_bg} • {label_bg}")
+        elif done_bg and total_bg and done_bg >= total_bg:
+            st.caption("Background cache warm-up complete")
 
         timeframe = st.selectbox("Timeframe", ["Day", "Week", "Month"], index=0)
         trade_side = st.selectbox("Signal Side", ["Buy", "Sell"], index=0)
